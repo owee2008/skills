@@ -1,0 +1,4 @@
+interface:
+  display_name: "Apifox 接口与测试上传"
+  short_description: "按项目目录映射上传接口、集成用例和场景定义并回查，不执行测试"
+  default_prompt: "使用 $apifox-import，上传本次接口及相关集成测试定义到指定项目，回查保存结果，不执行测试。"
