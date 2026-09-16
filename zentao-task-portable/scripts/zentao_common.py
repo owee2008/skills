@@ -58,6 +58,11 @@ class ZentaoError(Exception):
     pass
 
 
+class ZentaoWriteOutcomeUnknown(ZentaoError):
+    """写请求已发出，但客户端无法确认服务端是否保存成功。"""
+    pass
+
+
 class VaultError(Exception):
     """Vault 操作异常"""
     pass
@@ -631,7 +636,8 @@ class ZentaoClient:
         
         # 获取创建页面
         create_url = f"{self.base_url}/biz/task-create-{project_id}.html"
-        
+        stage = 'fetch_form'
+
         try:
             response = self.session.get(create_url, timeout=10)
             
@@ -665,8 +671,9 @@ class ZentaoClient:
             if token:
                 task_data['token'] = token
 
-            # 提交创建请求
+            # 提交创建请求。进入此阶段后的网络中断无法证明服务端没有保存。
             submit_url = f"{self.base_url}/biz/task-create-{project_id}.json"
+            stage = 'submit'
             response = self.session.post(submit_url, data=task_data, timeout=15)
             
             if response.status_code != 200:
@@ -708,9 +715,11 @@ class ZentaoClient:
                 elif 'task-view' in response.url or re.search(r'task-view-\d+', response.text):
                     return {'success': True}
                 else:
-                    raise ZentaoError("无法解析服务器响应；创建结果必须再按项目和精确任务名验证")
-                    
+                    raise ZentaoWriteOutcomeUnknown("无法解析创建响应；必须按项目和精确任务名确认结果")
+
         except requests.exceptions.RequestException as e:
+            if stage == 'submit':
+                raise ZentaoWriteOutcomeUnknown(f"创建请求结果未知: {e}")
             raise ZentaoError(f"创建任务请求失败: {e}")
 
     def get_task_edit_form(self, task_id: int) -> Dict[str, Any]:

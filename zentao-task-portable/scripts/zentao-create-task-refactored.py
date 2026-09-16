@@ -12,13 +12,17 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from zentao_common import ZentaoClient, ZentaoError, VaultError, check_user_permission
+from zentao_common import (
+    ZentaoClient, ZentaoError, ZentaoWriteOutcomeUnknown, VaultError, check_user_permission
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='创建禅道任务')
     parser.add_argument('legacy', nargs='*', metavar='参数', help='兼容：项目ID 任务名 模块ID [负责人 类型 工时 开始 截止]')
-    parser.add_argument('--batch-json', help='批量清单 JSON 文件；包含 project_id、tasks 和可选 user_text')
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument('--batch-json', help='待预检的批量清单 JSON 文件')
+    source.add_argument('--approved-plan', help='预检输出并经用户确认的版本化计划 JSON 文件')
     parser.add_argument('--dry-run', action='store_true', help='只登录和预检，不创建任务')
     parser.add_argument('--user-text', help='用于识别 tycd 或 typm 服务')
     parser.add_argument('--force', action='store_true', help='兼容旧参数；批量模式不需要交互确认')
@@ -66,8 +70,8 @@ def leaf_modules(modules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     )]
 
 
-def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
-    """读取并规范化最小批量清单，所有任务必须明确模块和负责人。"""
+def load_batch(path: str, user_text: str = None, require_approved: bool = False) -> Dict[str, Any]:
+    """读取并规范化批量清单或版本化批准计划。"""
     try:
         with open(path, encoding='utf-8') as handle:
             batch = json.load(handle)
@@ -75,9 +79,21 @@ def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
         raise ZentaoError(f'无法读取批量清单: {error}')
     if not isinstance(batch, dict):
         raise ZentaoError('批量清单必须是 JSON 对象')
-    project_ref = batch.get('project_id', batch.get('project'))
-    if project_ref in (None, ''):
-        raise ZentaoError('批量清单必须包含 project_id 或 project')
+    if require_approved and (
+        batch.get('plan_version') != 1 or batch.get('status') != 'ready' or batch.get('dry_run') is not True
+    ):
+        raise ZentaoError('批准计划格式无效：需要 dry_run=true、status=ready、plan_version=1')
+    project_value = batch.get('project')
+    if require_approved:
+        project_ref = batch.get('project_id') or (project_value.get('id') if isinstance(project_value, dict) else None)
+        if not str(project_ref or '').isdigit():
+            raise ZentaoError('批准计划格式无效：project.id 必须是数值 ID')
+    else:
+        project_ref = batch.get('project_id', project_value)
+        if isinstance(project_ref, dict):
+            project_ref = project_ref.get('id') or project_ref.get('name')
+        if project_ref in (None, ''):
+            raise ZentaoError('批量清单必须包含 project_id 或 project')
     if not isinstance(batch.get('tasks'), list) or not batch['tasks']:
         raise ZentaoError('批量清单必须包含非空 tasks 数组')
 
@@ -90,6 +106,8 @@ def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
         missing = [key for key in required if source.get(key) in (None, '')]
         if missing:
             raise ZentaoError(f'第 {index} 条任务缺少: {", ".join(missing)}')
+        if require_approved and not str(source['module']).isdigit():
+            raise ZentaoError(f'批准计划格式无效：第 {index} 条任务的 module 必须是数值 ID')
         try:
             task = {
                 'name': str(source['name']).strip(),
@@ -105,7 +123,11 @@ def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
             raise ZentaoError(f'第 {index} 条任务名称、负责人和正工时均为必填')
         tasks.append(task)
     normalized_project = int(project_ref) if str(project_ref).isdigit() else str(project_ref).strip()
-    return {'project_id': normalized_project, 'user_text': user_text or batch.get('user_text', ''), 'tasks': tasks}
+    service_text = user_text or batch.get('user_text') or batch.get('service', '')
+    return {
+        'project_id': normalized_project, 'user_text': service_text,
+        'approved': require_approved, 'tasks': tasks,
+    }
 
 
 def preflight_batch(client: ZentaoClient, batch: Dict[str, Any]) -> Dict[str, Any]:
@@ -138,6 +160,7 @@ def preflight_batch(client: ZentaoClient, batch: Dict[str, Any]) -> Dict[str, An
     if not assignees:
         raise ZentaoError(f'项目 {project_id} 的负责人列表不可用')
 
+    approved = batch.get('approved', False)
     confirmed_tasks = []
     ambiguities = []
     for task in batch['tasks']:
@@ -148,6 +171,8 @@ def preflight_batch(client: ZentaoClient, batch: Dict[str, Any]) -> Dict[str, An
         else:
             module_matches = match_reference(module_ref, leaf_modules(options['modules']), 'id', 'name')
             module = module_matches[0] if len(module_matches) == 1 else None
+        if not module and approved:
+            raise ZentaoError(f'批准计划模块已失效: {module_ref}，请重新预检')
         if not module:
             ambiguities.append({
                 'task': task['name'], 'field': 'module', 'input': module_ref,
@@ -157,8 +182,14 @@ def preflight_batch(client: ZentaoClient, batch: Dict[str, Any]) -> Dict[str, An
             })
 
         assignee_ref = task['assigned_to']
-        assignee_matches = match_reference(assignee_ref, options['assignees'], 'account', 'name')
-        assignee = assignee_matches[0] if len(assignee_matches) == 1 else None
+        if approved:
+            assignee = assignees.get(assignee_ref)
+            assignee_matches = [assignee] if assignee else []
+        else:
+            assignee_matches = match_reference(assignee_ref, options['assignees'], 'account', 'name')
+            assignee = assignee_matches[0] if len(assignee_matches) == 1 else None
+        if not assignee and approved:
+            raise ZentaoError(f'批准计划负责人已失效: {assignee_ref}，请重新预检')
         if not assignee:
             ambiguities.append({
                 'task': task['name'], 'field': 'assigned_to', 'input': assignee_ref,
@@ -181,6 +212,8 @@ def preflight_batch(client: ZentaoClient, batch: Dict[str, Any]) -> Dict[str, An
         }
 
     return {
+        'plan_version': 1,
+        'status': 'ready',
         'service': client.base_url,
         'project': {key: project.get(key) for key in ('id', 'name', 'status')},
         'tasks': confirmed_tasks,
@@ -198,10 +231,17 @@ def create_and_verify(client: ZentaoClient, project_id: int, task: Dict[str, Any
     source = 'reused'
     if not found:
         source = 'created'
-        client.create_task(project_id, task['name'], module=task['module'], assigned_to=task['assigned_to'],
-                           task_type=task['task_type'], estimate=task['estimate'], begin=task['begin'],
-                           end=task['end'], desc=task['desc'])
-        found = client.verify_task_created(project_id, task['name'], exact=True)
+        try:
+            client.create_task(project_id, task['name'], module=task['module'], assigned_to=task['assigned_to'],
+                               task_type=task['task_type'], estimate=task['estimate'], begin=task['begin'],
+                               end=task['end'], desc=task['desc'])
+        except ZentaoWriteOutcomeUnknown:
+            found = client.verify_task_created(project_id, task['name'], exact=True)
+            if not found:
+                raise
+            source = 'recovered'
+        else:
+            found = client.verify_task_created(project_id, task['name'], exact=True)
     if not found:
         raise ZentaoError(f'创建后未找到精确名称任务: {task["name"]}')
     detail = client.get_task_detail(int(found['id']))
@@ -264,7 +304,11 @@ def main() -> int:
         print('错误: 您没有权限使用此功能')
         return 1
     try:
-        batch = load_batch(args.batch_json, args.user_text) if args.batch_json else legacy_batch(args.legacy, args.user_text)
+        source_path = args.approved_plan or args.batch_json
+        batch = (
+            load_batch(source_path, args.user_text, require_approved=bool(args.approved_plan))
+            if source_path else legacy_batch(args.legacy, args.user_text)
+        )
         if not args.dry_run and not confirm_test_task(batch, args.force):
             return 1
         return run_batch(batch, args.dry_run)
