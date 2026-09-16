@@ -1,0 +1,11 @@
+[tool.bumpversion]
+current_version = "1.2"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)"
+serialize = ["{major}.{minor}"]
+commit = false
+tag = false
+
+[[tool.bumpversion.files]]
+filename = "SKILL.md"
+search = 'version: "{current_version}"'
+replace = 'version: "{new_version}"'

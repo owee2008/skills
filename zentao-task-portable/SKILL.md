@@ -1,6 +1,7 @@
 ---
 name: "zentao-task"
 description: "安全创建、查询、修改和关闭田一或科技禅道任务；工时调整同步剩余工时"
+version: "1.2"
 ---
 
 # zentao-task
