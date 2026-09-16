@@ -1,7 +1,8 @@
 ---
 name: "zentao-task"
 description: "安全创建、查询、修改和关闭田一或科技禅道任务；工时调整同步剩余工时"
-version: "1.5"
+metadata:
+  version: "1.6"
 ---
 
 # zentao-task
@@ -32,23 +33,23 @@ mkdir -p "$ZENTAO_WORKSPACE_DIR/zentao-artifacts"
 
 ## 创建任务安全流程
 
-1. 从用户请求提取服务、项目、模块、负责人、标题、类型、工时和日期。
-2. 项目不明确才查询项目；模块不明确才查询目标项目模块；中文负责人未知才读取目标项目创建页确认账号。不要用静态映射替代实时结果。
-3. 将完整清单作为普通消息展示：服务、项目/模块 ID、负责人账号、标题、预计和剩余工时、日期、类型。批量任务必须整批确认。
-4. 用户回复“确认创建”等明确授权后才可写入；如果用户改了任务明细，视为替换草案，重新展示清单。
-5. 批量时使用同一个 CLI 和同一个会话：先 `--dry-run`，确认后去掉该参数执行。创建后必须精确名称查重并读回项目、模块、负责人、`estimate`、`left`、日期和类型。
+1. 从用户请求提取服务、项目、模块、负责人、标题、类型、工时和日期，名称可直接写入请求清单。
+2. 运行一次 `--batch-json <request> --dry-run`。脚本在同一会话内实时解析并校验项目、leaf 模块和负责人；唯一命中时输出版本化批准计划，歧义时只输出相关候选。项目、模块和负责人事实只由这次预检实时解析；帮助探测、独立列表查询、源码检查和临时 Python 不属于创建流程。
+3. 将批准计划中的完整清单作为普通消息展示：服务、项目/模块 ID、负责人账号、标题、预计和剩余工时、日期、类型。批量任务必须整批确认。
+4. 用户修改草案时更新原请求清单并重新预检。用户明确确认后，使用同一份计划运行一次 `--approved-plan <plan>`；不能手工改写已批准的 ID 或账号。
+5. 执行器重新校验批准事实、精确同名查重、恢复写结果未知的请求并读回关键字段；最终回复只使用执行 JSON 中的验证结果。
 
 批量清单示例：
 
 ```json
 {
-  "project_id": 1681,
-  "user_text": "tycd 田一禅道",
+  "project": "我的日志项目",
+  "user_text": "田一禅道",
   "tasks": [
     {
       "name": "行程轨迹异常状态字段",
-      "module": 9701,
-      "assigned_to": "zhangbin",
+      "module": "行车模块",
+      "assigned_to": "张斌",
       "estimate": 2,
       "task_type": "devel",
       "begin": "2026-09-01",
@@ -59,17 +60,17 @@ mkdir -p "$ZENTAO_WORKSPACE_DIR/zentao-artifacts"
 ```
 
 ```bash
-python3 scripts/zentao-create-task-refactored.py --batch-json tasks.json --dry-run
-python3 scripts/zentao-create-task-refactored.py --batch-json tasks.json
+python3 scripts/zentao-create-task-refactored.py --batch-json request.json --dry-run > approved-plan.json
+python3 scripts/zentao-create-task-refactored.py --approved-plan approved-plan.json
 ```
 
-`--dry-run` 只登录和校验项目状态、真实模块、负责人下拉及清单，绝不创建任务。单任务旧位置参数继续可用。
+`--dry-run` 只登录和校验，绝不创建任务；`--approved-plan` 只接受版本化预检输出。旧位置参数和旧 batch JSON 执行方式保留兼容，但新流程统一使用批准计划。
 
 ## 不可突破的规则
 
 - 混合 tycd/typm 关键词时先让用户选择服务；不能依赖关键词优先级直接创建。
 - 模块必须属于实时目标项目；优先 leaf 模块。项目关闭、没有模块或创建页拒绝时停止。
 - 不根据中文姓名猜禅道账号；不因其它项目可选而假设目标项目可指派。
-- 创建 POST 超时后先精确查询同项目同名任务，确认不存在才重试。
+- 创建 POST 写结果未知时由执行器精确查询同项目同名任务；未命中即失败，不自动重复 POST。
 - 修改未完成任务工时且用户未限定字段时，`estimate` 与 `left` 同步增减；已完成任务先读取并取得明确确认，`left` 保持 `0`。
 - 最终回复只报告读回验证的事实；截图、备份等产物保存在工作区。

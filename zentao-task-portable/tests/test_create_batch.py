@@ -84,7 +84,7 @@ class FakeClient:
         return '/tmp/zentao-task-list.png'
 
 
-def run_cli(client, batch, dry_run=True):
+def run_cli_args(client, argv):
     class ClientFactory:
         @staticmethod
         def detect_service_from_text(_text):
@@ -93,18 +93,22 @@ def run_cli(client, batch, dry_run=True):
         def __new__(cls, _url):
             return client
 
+    output = io.StringIO()
+    with patch.object(CREATE, 'ZentaoClient', ClientFactory), \
+            patch.object(sys, 'argv', argv), redirect_stdout(output):
+        exit_code = CREATE.main()
+    return exit_code, output.getvalue()
+
+
+def run_cli(client, batch, dry_run=True, approved=True):
     with tempfile.NamedTemporaryFile('w', suffix='.json', encoding='utf-8') as handle:
         json.dump(batch, handle, ensure_ascii=False)
         handle.flush()
-        output = io.StringIO()
-        option = '--batch-json' if dry_run else '--approved-plan'
+        option = '--approved-plan' if approved and not dry_run else '--batch-json'
         argv = ['zentao-create-task-refactored.py', option, handle.name]
         if dry_run:
             argv.append('--dry-run')
-        with patch.object(CREATE, 'ZentaoClient', ClientFactory), \
-                patch.object(sys, 'argv', argv), redirect_stdout(output):
-            exit_code = CREATE.main()
-    return exit_code, output.getvalue()
+        return run_cli_args(client, argv)
 
 
 def test_exact_create_verification_does_not_reuse_similar_task():
@@ -414,3 +418,59 @@ def test_cli_rejects_approved_plan_without_numeric_project_and_module_ids():
     assert exit_code == 1
     assert client.created == []
     assert '批准计划格式无效' in raw_output
+
+
+def test_cli_keeps_legacy_batch_json_execution_compatible():
+    client = FakeClient()
+    batch = {'project_id': 1681, 'user_text': '田一禅道', 'tasks': [
+        {'name': '任务 A', 'module': 11, 'assigned_to': 'alice', 'estimate': 2,
+         'begin': '2026-09-01', 'end': '2026-09-10'}
+    ]}
+
+    exit_code, raw_output = run_cli(client, batch, dry_run=False, approved=False)
+
+    payload = json.loads(raw_output)
+    assert exit_code == 0
+    assert payload['tasks'][0]['source'] == 'created'
+    assert payload['tasks'][0]['left'] == '2'
+    assert client.screenshot_calls == 1
+
+
+def test_cli_keeps_legacy_positional_execution_compatible():
+    client = FakeClient()
+    argv = [
+        'zentao-create-task-refactored.py', '1681', '任务 A', '11',
+        'alice', 'devel', '2', '2026-09-01', '2026-09-10',
+    ]
+
+    exit_code, raw_output = run_cli_args(client, argv)
+
+    payload = json.loads(raw_output)
+    assert exit_code == 0
+    assert payload['tasks'][0]['source'] == 'created'
+    assert payload['tasks'][0]['assignedTo'] == 'alice'
+    assert client.screenshot_calls == 1
+
+
+def test_named_request_uses_one_preflight_then_one_approved_execution():
+    client = FakeClient()
+    client.get_projects = lambda: [{'id': 1681, 'name': '我的日志'}]
+    client.get_task_creation_options = lambda _project_id: {
+        'modules': [{'id': 9701, 'name': '/服务和工单/行车记录'}],
+        'assignees': [{'account': 'chenye', 'name': 'C:陈烨'}],
+    }
+    request = {'project': '我的日志项目', 'user_text': '田一禅道', 'tasks': [
+        {'name': '行车状态字段', 'module': '行车模块', 'assigned_to': '陈烨', 'estimate': 2}
+    ]}
+
+    preflight_code, preflight_output = run_cli(client, request, dry_run=True)
+    approved_plan = json.loads(preflight_output)
+    execute_code, execute_output = run_cli(client, approved_plan, dry_run=False)
+
+    result = json.loads(execute_output)
+    assert preflight_code == execute_code == 0
+    assert approved_plan['status'] == 'ready'
+    assert len(client.created) == 1
+    assert result['tasks'][0]['name'] == '行车状态字段'
+    assert result['tasks'][0]['assignedTo'] == 'chenye'
+    assert client.screenshot_calls == 1

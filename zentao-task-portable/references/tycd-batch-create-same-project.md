@@ -1,58 +1,25 @@
-# 田一禅道同项目同负责人批量创建任务
+# 田一禅道同项目批量创建任务
 
-Use this reference when Zhou asks to create several new tasks in the same田一禅道 project/module/assignee, especially after giving a compact list of task titles and a shared estimate.
+同一项目的一条或多条创建请求统一走版本化两调用流程，预检和批准执行是唯一编排入口。
 
-## Proven flow
+## 流程
 
-1. Resolve service/project/module/assignee before creating:
-   - 田一禅道: `https://tycd.tygps.com`
-   - 口语「我的日志项目」通常 resolves to project `1681` / 「我的日志」.
-   - 口语「PC版本模块」 in this project maps to realtime module `/APP/Web 我的日志` (`9721`) after querying modules.
-   - Verify Chinese assignee on `/biz/task-create-<projectID>.html`; extract `<option value>` from the `assignedTo[]` select. Example seen: 张旭男 = `zhangxunan`.
-2. Recalculate default dates at execution time, not just preview time:
-   - `begin = today - 5 days`
-   - `end = today + 10 days`
-3. Show the final create table in normal chat and wait for an explicit confirmation before writing. If only hours were missing, accept a later reply such as “每个任务10小时” as filling the draft, then re-show final table and wait for “确认/确认创建”.
-4. Create in one Python process, reusing one `ZentaoClient('https://tycd.tygps.com')` login session. For each task:
-   - `verify_task_created(project_id, name)` before POST to avoid duplicates.
-   - `create_task(project_id, name, module=..., assigned_to=..., task_type='devel', estimate=..., begin=..., end=..., desc=...)`.
-   - If `create_task` response only locates the project task list and has no task id, call `verify_task_created(project_id, name)` to recover the id.
-   - `get_task_detail(task_id)` and verify `project`, `module`, `assignedTo`, `type`, `estimate`, `left`, `estStarted`, `deadline`, `status`, and `name`.
-5. Generate one screenshot for the last/newest task using:
+1. 将用户给出的田一禅道、项目、模块、负责人、任务名和工时写入请求 JSON；项目、leaf 模块和中文负责人可以保留普通名称。
+2. 运行一次预检并保存输出：
 
 ```bash
-python3 "$SKILL_DIR/scripts/zentao-screenshot-task.py" <lastTaskID> 'tycd 田一禅道' <projectID>
+python3 "$SKILL_DIR/scripts/zentao-create-task-refactored.py" --batch-json request.json --dry-run > approved-plan.json
 ```
 
-## Minimal script shape
+3. 普通消息展示批准计划中的服务、项目、模块、负责人、工时和日期。若返回 `needs_confirmation`，只展示其中的相关候选，更新请求后重新预检。
+4. 用户明确确认后执行同一份计划：
 
-```python
-from scripts.zentao_common import ZentaoClient
-
-client = ZentaoClient('https://tycd.tygps.com')
-client.login_with_available_credentials()
-
-for name in task_names:
-    existing = client.verify_task_created(project_id, name)
-    if existing:
-        task_id = existing['id']
-    else:
-        created = client.create_task(
-            project_id,
-            name,
-            module=module_id,
-            assigned_to=assignee,
-            task_type='devel',
-            estimate=estimate,
-            begin=begin,
-            end=end,
-            desc=f'按用户要求创建：{name}',
-        )
-        task_id = created.get('id') or client.verify_task_created(project_id, name)['id']
-    detail = client.get_task_detail(int(task_id))
-    # verify fields from detail/raw_fields before reporting success
+```bash
+python3 "$SKILL_DIR/scripts/zentao-create-task-refactored.py" --approved-plan approved-plan.json
 ```
+
+5. 只按执行 JSON 报告任务。执行器负责精确同名复用、写结果未知恢复、详情读回和整批单截图。
 
 ## Reporting
 
-Return a compact table with task id, task name, project, module, assignee, type, estimate, left, begin, deadline, and status. Include the screenshot as `MEDIA:<path>`.
+返回任务 ID、名称、项目、模块、负责人、类型、estimate、left、begin、deadline、source 和截图路径。
