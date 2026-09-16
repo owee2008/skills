@@ -68,32 +68,34 @@ def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
     return {'project_id': int(batch['project_id']), 'user_text': user_text or batch.get('user_text', ''), 'tasks': tasks}
 
 
-def leaf_modules(modules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """仅保留没有下级路径的模块，供预检输出给用户确认。"""
-    names = [str(module.get('name', '')).rstrip('/') for module in modules]
-    return [module for module in modules if not any(
-        other.startswith(f"{str(module.get('name', '')).rstrip('/')}/") for other in names
-    )]
-
-
 def preflight_batch(client: ZentaoClient, batch: Dict[str, Any]) -> Dict[str, Any]:
-    """一次登录内校验项目、模块和负责人；此函数绝不写入禅道。"""
+    """校验 load_batch 已规范化的任务；此函数绝不写入禅道。"""
     project_id = batch['project_id']
     project = client.get_project_info(project_id)
     if str(project.get('status', '')).lower() in {'closed', 'done'}:
         raise ZentaoError(f'项目 {project_id} 当前状态不可创建: {project.get("status")}')
     options = client.get_task_creation_options(project_id)
-    module_ids = {int(module['id']) for module in options['modules']}
-    assignees = {item['account'] for item in options['assignees']}
+    modules = {int(module['id']): module for module in options['modules']}
+    assignees = {item['account']: item for item in options['assignees']}
+    if not modules:
+        raise ZentaoError(f'项目 {project_id} 没有可用任务模块')
+    if not assignees:
+        raise ZentaoError(f'项目 {project_id} 的负责人列表不可用')
+
+    confirmed_tasks = []
     for task in batch['tasks']:
-        if task['module'] not in module_ids:
+        module = modules.get(task['module'])
+        if not module:
             raise ZentaoError(f'模块 {task["module"]} 不属于项目 {project_id}')
-        if assignees and task['assigned_to'] not in assignees:
+        assignee = assignees.get(task['assigned_to'])
+        if not assignee:
             raise ZentaoError(f'负责人 {task["assigned_to"]} 不在项目 {project_id} 的创建页下拉中')
+        confirmed_tasks.append({**task, 'module_name': module['name'], 'assignee_name': assignee['name']})
+
     return {
         'service': client.base_url,
         'project': {key: project.get(key) for key in ('id', 'name', 'status')},
-        'leaf_modules': leaf_modules(options['modules']), 'tasks': batch['tasks'],
+        'tasks': confirmed_tasks,
     }
 
 

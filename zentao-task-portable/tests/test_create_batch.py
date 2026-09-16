@@ -1,7 +1,11 @@
 import importlib.util
+import io
 import json
 import pathlib
 import sys
+import tempfile
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
 SCRIPTS = pathlib.Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
@@ -51,6 +55,9 @@ class FakeClient:
         self.created = []
         self.verified = []
 
+    def login_with_available_credentials(self):
+        return True
+
     def get_project_info(self, _project_id):
         return {'id': 1681, 'name': '我的日志', 'status': 'doing'}
 
@@ -70,6 +77,26 @@ class FakeClient:
         return {'project': '1681', 'module': str(task['module']), 'assignedTo': task['assigned_to'],
                 'type': task['task_type'], 'estimate': task['estimate'], 'left': task['estimate'],
                 'raw_fields': {'estStarted': task['begin'], 'deadline': task['end']}}
+
+
+def run_cli_dry_run(client, batch):
+    class ClientFactory:
+        @staticmethod
+        def detect_service_from_text(_text):
+            return client.base_url
+
+        def __new__(cls, _url):
+            return client
+
+    with tempfile.NamedTemporaryFile('w', suffix='.json', encoding='utf-8') as handle:
+        json.dump(batch, handle, ensure_ascii=False)
+        handle.flush()
+        output = io.StringIO()
+        with patch.object(CREATE, 'ZentaoClient', ClientFactory), \
+                patch.object(sys, 'argv', ['zentao-create-task-refactored.py', '--batch-json', handle.name, '--dry-run']), \
+                redirect_stdout(output):
+            exit_code = CREATE.main()
+    return exit_code, output.getvalue()
 
 
 def test_exact_create_verification_does_not_reuse_similar_task():
@@ -103,7 +130,8 @@ def test_dry_run_preflight_has_no_create_call():
     plan = CREATE.preflight_batch(client, batch)
 
     assert client.created == []
-    assert [item['id'] for item in plan['leaf_modules']] == [11]
+    assert plan['tasks'][0]['module_name'] == '/父/子'
+    assert plan['tasks'][0]['assignee_name'] == 'A:Alice'
 
 
 def test_batch_create_uses_keyword_fields_and_reads_back_left_hours():
@@ -119,3 +147,37 @@ def test_batch_create_uses_keyword_fields_and_reads_back_left_hours():
     })]
     assert client.verified == [('任务 A', True), ('任务 A', True)]
     assert result['left'] == '2'
+
+
+def test_cli_dry_run_returns_compact_confirmation_without_writes():
+    client = FakeClient()
+    batch = {'project_id': 1681, 'user_text': '田一禅道', 'tasks': [
+        {'name': '任务 A', 'module': 11, 'assigned_to': 'alice', 'estimate': 2}
+    ]}
+
+    exit_code, raw_output = run_cli_dry_run(client, batch)
+
+    payload = json.loads(raw_output)
+    assert exit_code == 0
+    assert client.created == []
+    assert 'leaf_modules' not in payload
+    assert payload['tasks'][0]['module_name'] == '/父/子'
+    assert payload['tasks'][0]['assignee_name'] == 'A:Alice'
+    assert payload['tasks'][0]['begin'] == CREATE.default_dates()['begin']
+    assert payload['tasks'][0]['end'] == CREATE.default_dates()['end']
+
+
+def test_cli_dry_run_fails_closed_when_assignee_options_are_unavailable():
+    client = FakeClient()
+    client.get_task_creation_options = lambda _project_id: {
+        'modules': [{'id': 11, 'name': '/父/子'}], 'assignees': []
+    }
+    batch = {'project_id': 1681, 'user_text': '田一禅道', 'tasks': [
+        {'name': '任务 A', 'module': 11, 'assigned_to': 'alice', 'estimate': 2}
+    ]}
+
+    exit_code, raw_output = run_cli_dry_run(client, batch)
+
+    assert exit_code == 1
+    assert client.created == []
+    assert '负责人列表不可用' in raw_output
