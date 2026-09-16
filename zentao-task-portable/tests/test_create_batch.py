@@ -181,3 +181,58 @@ def test_cli_dry_run_fails_closed_when_assignee_options_are_unavailable():
     assert exit_code == 1
     assert client.created == []
     assert '负责人列表不可用' in raw_output
+
+
+def test_cli_dry_run_resolves_unique_project_module_and_assignee_names():
+    assert ZentaoClient.detect_service_from_text('田一禅道') == 'https://tycd.tygps.com'
+    client = FakeClient()
+    client.get_projects = lambda: [{'id': 1681, 'name': '我的日志'}]
+    client.get_task_creation_options = lambda _project_id: {
+        'modules': [{'id': 9701, 'name': '/服务和工单/行车记录'}],
+        'assignees': [{'account': 'chenye', 'name': 'C:陈烨'}],
+    }
+    batch = {'project': '我的日志项目', 'user_text': '田一禅道', 'tasks': [
+        {'name': '任务 A', 'module': '行车模块', 'assigned_to': '陈烨', 'estimate': 2}
+    ]}
+
+    exit_code, raw_output = run_cli_dry_run(client, batch)
+
+    payload = json.loads(raw_output)
+    assert exit_code == 0
+    assert client.created == []
+    assert payload['project']['id'] == 1681
+    assert payload['tasks'][0]['module'] == 9701
+    assert payload['tasks'][0]['module_name'] == '/服务和工单/行车记录'
+    assert payload['tasks'][0]['assigned_to'] == 'chenye'
+    assert payload['tasks'][0]['assignee_name'] == 'C:陈烨'
+
+
+def test_cli_dry_run_returns_compact_module_ambiguity_without_writes():
+    client = FakeClient()
+    client.get_task_creation_options = lambda _project_id: {
+        'modules': [
+            {'id': 9701, 'name': '/服务和工单/行车记录'},
+            {'id': 9702, 'name': '/服务和工单/行车报表'},
+            {'id': 9703, 'name': '/APP/Web 我的日志'},
+        ],
+        'assignees': [{'account': 'chenye', 'name': 'C:陈烨'}],
+    }
+    batch = {'project_id': 1681, 'user_text': '田一禅道', 'tasks': [
+        {'name': '任务 A', 'module': '行车模块', 'assigned_to': '陈烨', 'estimate': 2}
+    ]}
+
+    exit_code, raw_output = run_cli_dry_run(client, batch)
+
+    payload = json.loads(raw_output)
+    assert exit_code == 0
+    assert client.created == []
+    assert payload['status'] == 'needs_confirmation'
+    assert payload['ambiguities'] == [{
+        'task': '任务 A',
+        'field': 'module',
+        'input': '行车模块',
+        'candidates': [
+            {'id': 9701, 'name': '/服务和工单/行车记录'},
+            {'id': 9702, 'name': '/服务和工单/行车报表'},
+        ],
+    }]

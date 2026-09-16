@@ -5,6 +5,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date, timedelta
 from typing import Any, Dict, List
@@ -31,6 +32,40 @@ def default_dates() -> Dict[str, str]:
     return {'begin': str(today - timedelta(days=5)), 'end': str(today + timedelta(days=10))}
 
 
+def normalize_reference(value: Any) -> str:
+    """归一化用户口语名称，例如“我的日志项目”与“我的日志”。"""
+    text = re.sub(r'[\s/_\-:：]+', '', str(value).strip().lower())
+    for suffix in ('项目', '模块'):
+        if text.endswith(suffix):
+            text = text[:-len(suffix)]
+    return text
+
+
+def match_reference(value: Any, items: List[Dict[str, Any]], id_key: str, name_key: str) -> List[Dict[str, Any]]:
+    """优先按 ID/账号或完整名称匹配，找不到时再返回相关名称。"""
+    raw = str(value).strip()
+    direct = [item for item in items if str(item.get(id_key, '')).strip() == raw]
+    if direct:
+        return direct
+    needle = normalize_reference(raw)
+    keyed = []
+    for item in items:
+        name = str(item.get(name_key, ''))
+        keys = {normalize_reference(name)}
+        keys.update(normalize_reference(part) for part in re.split(r'[/：:]', name) if part)
+        keyed.append((item, keys))
+    exact = [item for item, keys in keyed if needle in keys]
+    return exact or [item for item, keys in keyed if any(needle in key or key in needle for key in keys)]
+
+
+def leaf_modules(modules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """名称推断只使用没有下级路径的真实模块。"""
+    names = [str(module.get('name', '')).rstrip('/') for module in modules]
+    return [module for module in modules if not any(
+        other.startswith(f"{str(module.get('name', '')).rstrip('/')}/") for other in names
+    )]
+
+
 def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
     """读取并规范化最小批量清单，所有任务必须明确模块和负责人。"""
     try:
@@ -38,8 +73,11 @@ def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
             batch = json.load(handle)
     except (OSError, json.JSONDecodeError) as error:
         raise ZentaoError(f'无法读取批量清单: {error}')
-    if not isinstance(batch, dict) or not str(batch.get('project_id', '')).isdigit():
-        raise ZentaoError('批量清单必须包含数字 project_id')
+    if not isinstance(batch, dict):
+        raise ZentaoError('批量清单必须是 JSON 对象')
+    project_ref = batch.get('project_id', batch.get('project'))
+    if project_ref in (None, ''):
+        raise ZentaoError('批量清单必须包含 project_id 或 project')
     if not isinstance(batch.get('tasks'), list) or not batch['tasks']:
         raise ZentaoError('批量清单必须包含非空 tasks 数组')
 
@@ -54,7 +92,8 @@ def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
             raise ZentaoError(f'第 {index} 条任务缺少: {", ".join(missing)}')
         try:
             task = {
-                'name': str(source['name']).strip(), 'module': int(source['module']),
+                'name': str(source['name']).strip(),
+                'module': int(source['module']) if str(source['module']).isdigit() else str(source['module']).strip(),
                 'assigned_to': str(source['assigned_to']).strip(), 'estimate': str(source['estimate']).strip(),
                 'task_type': str(source.get('task_type') or 'devel'),
                 'begin': str(source.get('begin') or dates['begin']),
@@ -65,12 +104,29 @@ def load_batch(path: str, user_text: str = None) -> Dict[str, Any]:
         if not task['name'] or not task['assigned_to'] or float(task['estimate']) <= 0:
             raise ZentaoError(f'第 {index} 条任务名称、负责人和正工时均为必填')
         tasks.append(task)
-    return {'project_id': int(batch['project_id']), 'user_text': user_text or batch.get('user_text', ''), 'tasks': tasks}
+    normalized_project = int(project_ref) if str(project_ref).isdigit() else str(project_ref).strip()
+    return {'project_id': normalized_project, 'user_text': user_text or batch.get('user_text', ''), 'tasks': tasks}
 
 
 def preflight_batch(client: ZentaoClient, batch: Dict[str, Any]) -> Dict[str, Any]:
     """校验 load_batch 已规范化的任务；此函数绝不写入禅道。"""
-    project_id = batch['project_id']
+    project_ref = batch['project_id']
+    if isinstance(project_ref, int):
+        project_id = project_ref
+    else:
+        project_matches = match_reference(project_ref, client.get_projects(), 'id', 'name')
+        if len(project_matches) != 1:
+            return {
+                'service': client.base_url,
+                'status': 'needs_confirmation',
+                'ambiguities': [{
+                    'field': 'project', 'input': project_ref,
+                    'candidates': [
+                        {'id': int(item['id']), 'name': item.get('name', '')} for item in project_matches
+                    ],
+                }],
+            }
+        project_id = int(project_matches[0]['id'])
     project = client.get_project_info(project_id)
     if str(project.get('status', '')).lower() in {'closed', 'done'}:
         raise ZentaoError(f'项目 {project_id} 当前状态不可创建: {project.get("status")}')
@@ -83,14 +139,46 @@ def preflight_batch(client: ZentaoClient, batch: Dict[str, Any]) -> Dict[str, An
         raise ZentaoError(f'项目 {project_id} 的负责人列表不可用')
 
     confirmed_tasks = []
+    ambiguities = []
     for task in batch['tasks']:
-        module = modules.get(task['module'])
+        module_ref = task['module']
+        module_matches = []
+        if isinstance(module_ref, int):
+            module = modules.get(module_ref)
+        else:
+            module_matches = match_reference(module_ref, leaf_modules(options['modules']), 'id', 'name')
+            module = module_matches[0] if len(module_matches) == 1 else None
         if not module:
-            raise ZentaoError(f'模块 {task["module"]} 不属于项目 {project_id}')
-        assignee = assignees.get(task['assigned_to'])
+            ambiguities.append({
+                'task': task['name'], 'field': 'module', 'input': module_ref,
+                'candidates': [
+                    {'id': int(item['id']), 'name': item.get('name', '')} for item in module_matches
+                ],
+            })
+
+        assignee_ref = task['assigned_to']
+        assignee_matches = match_reference(assignee_ref, options['assignees'], 'account', 'name')
+        assignee = assignee_matches[0] if len(assignee_matches) == 1 else None
         if not assignee:
-            raise ZentaoError(f'负责人 {task["assigned_to"]} 不在项目 {project_id} 的创建页下拉中')
-        confirmed_tasks.append({**task, 'module_name': module['name'], 'assignee_name': assignee['name']})
+            ambiguities.append({
+                'task': task['name'], 'field': 'assigned_to', 'input': assignee_ref,
+                'candidates': [
+                    {'account': item['account'], 'name': item.get('name', '')} for item in assignee_matches
+                ],
+            })
+        if module and assignee:
+            confirmed_tasks.append({
+                **task, 'module': int(module['id']), 'module_name': module['name'],
+                'assigned_to': assignee['account'], 'assignee_name': assignee['name'],
+            })
+
+    if ambiguities:
+        return {
+            'service': client.base_url,
+            'status': 'needs_confirmation',
+            'project': {key: project.get(key) for key in ('id', 'name', 'status')},
+            'ambiguities': ambiguities,
+        }
 
     return {
         'service': client.base_url,
@@ -132,10 +220,10 @@ def run_batch(batch: Dict[str, Any], dry_run: bool) -> int:
     client = ZentaoClient(ZentaoClient.detect_service_from_text(batch['user_text']))
     client.login_with_available_credentials()
     plan = preflight_batch(client, batch)
-    if dry_run:
-        print(json.dumps({'dry_run': True, **plan}, ensure_ascii=False, indent=2))
-        return 0
-    results = [create_and_verify(client, batch['project_id'], task) for task in batch['tasks']]
+    if dry_run or plan.get('status') == 'needs_confirmation':
+        print(json.dumps({'dry_run': dry_run, **plan}, ensure_ascii=False, indent=2))
+        return 0 if dry_run else 1
+    results = [create_and_verify(client, int(plan['project']['id']), task) for task in plan['tasks']]
     screenshot = client.screenshot_task_list()
     print(json.dumps({'dry_run': False, 'service': client.base_url, 'tasks': results,
                       'screenshot': screenshot}, ensure_ascii=False, indent=2))
