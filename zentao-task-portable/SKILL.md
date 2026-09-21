@@ -2,7 +2,7 @@
 name: "zentao-task"
 description: "安全创建、查询、修改和关闭田一或科技禅道任务；工时调整同步剩余工时"
 metadata:
-  version: "1.6"
+  version: "1.7"
 ---
 
 # zentao-task
@@ -18,7 +18,19 @@ export ZENTAO_WORKSPACE_DIR="/path/to/agent-workspace"
 mkdir -p "$ZENTAO_WORKSPACE_DIR/zentao-artifacts"
 ```
 
-脚本从 `VAULT_ADDR`、`VAULT_TOKEN` 读取凭据。缺少或不可用时，停止在只读草案，说明 Vault 问题；不得猜测凭据、搜索用户目录或输出 token/password。
+凭据来源按优先级（实现在 `scripts/zentao_common.py` 的 `VaultClient.__init__`）：
+
+1. 显式入参 `VaultClient(token=…, addr=…)`
+2. 环境变量 `VAULT_TOKEN` / `VAULT_ADDR`（addr 默认 `http://127.0.0.1:8200`）
+3. 文件 `~/.vault-token`（Vault CLI 约定位置，权限必须为 `600`）
+
+第 3 条为什么存在：由 GUI（Dock / Finder）启动的进程不加载 `~/.zshrc`，只继承 launchd 环境，所以 `VAULT_TOKEN` 常常取不到；读约定位置的凭据文件可绕开这条继承链。
+
+**凭据读取边界（不可突破）**
+
+- 只允许读 `~/.vault-token` 这一个约定位置。**不得扫描、遍历或搜索其它用户目录寻找凭据**，不得从 `~/.zshrc`、`.bashrc`、`.profile` 等 shell 配置文件中提取凭据。
+- 缺少或不可用时，停止在只读草案，说明 Vault 问题；不得猜测凭据。
+- 任何输出（含调试、报错、日志）中都不得回显 token 或 password。
 
 ## 路由
 

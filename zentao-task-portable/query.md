@@ -26,7 +26,7 @@
 
 ## 排查
 
-- 登录失败：检查 `VAULT_TOKEN`、Vault sealed 状态、`secret/zentao/zhouwei` 凭据。
+- 登录失败：按 SKILL.md「工作区与凭据」的优先级逐项检查（显式入参 → `VAULT_TOKEN` 环境变量 → `~/.vault-token` 文件）、Vault sealed 状态、`secret/zentao/zhouwei` 凭据。
 - 无权限：确认当前 Vault 账号是否能访问目标项目或任务。
 - 任务不存在：确认使用的是田一还是科技部门禅道。
 - 页面字段变化：参考 `references.md`，必要时重新检查禅道 HTML 表单字段。

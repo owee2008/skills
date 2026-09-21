@@ -1,0 +1,34 @@
+# bump-my-version 配置 —— semver 的单一事实源。
+#
+# 放到函数源码目录根下。这个文件的 current_version 就是权威版本号，
+# bump 时同步写进 VERSION 和 index.py，三处永远一致。
+#
+#   bump-my-version bump patch     # 0.1.0 -> 0.1.1
+#   bump-my-version bump minor     # 0.1.0 -> 0.2.0
+#   bump-my-version show-bump      # 只看会变成什么
+#
+# 坑：不要跑 `bump-my-version sample-config`，它在非 TTY 环境会直接崩
+#     （prompt_toolkit 报 OSError: [Errno 22] Invalid argument）。
+#
+# 注意：SCF 的函数版本号是**自增整数**（1,2,3...），不可指定。
+#      semver 只能写进 PublishVersion 的 Description 做映射，见 deploy.py --stage publish。
+
+[tool.bumpversion]
+current_version = "0.1.0"
+
+parse = "(?P<major>0|[1-9]\\d*)\\.(?P<minor>0|[1-9]\\d*)\\.(?P<patch>0|[1-9]\\d*)"
+serialize = ["{major}.{minor}.{patch}"]
+
+tag = false
+commit = false
+allow_dirty = true
+
+[[tool.bumpversion.files]]
+filename = "VERSION"
+search = "{current_version}"
+replace = "{new_version}"
+
+[[tool.bumpversion.files]]
+filename = "index.py"
+search = "__version__ = \"{current_version}\""
+replace = "__version__ = \"{new_version}\""

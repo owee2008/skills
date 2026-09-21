@@ -170,15 +170,37 @@ class VaultClient:
             token: Vault 访问令牌，默认从环境变量 VAULT_TOKEN 读取
         """
         self.addr = (addr or os.getenv('VAULT_ADDR', 'http://127.0.0.1:8200')).rstrip('/')
-        self.token = token or os.getenv('VAULT_TOKEN', '')
-        
+        # token 优先级：显式入参 > VAULT_TOKEN 环境变量 > ~/.vault-token 文件
+        # 文件兜底是必要的：由 GUI（Dock/Finder）启动的进程不加载 ~/.zshrc，
+        # 环境变量经常拿不到，而 ~/.vault-token 是 Vault CLI 的官方约定位置。
+        self.token = token or os.getenv('VAULT_TOKEN', '') or self._read_token_file()
+
         if not self.token:
-            raise VaultError("未设置 Vault Token，请设置 VAULT_TOKEN 环境变量")
+            raise VaultError(
+                "未设置 Vault Token：请设置 VAULT_TOKEN 环境变量，"
+                "或写入 ~/.vault-token 文件（Vault CLI 约定）"
+            )
         
         self.headers = {
             'X-Vault-Token': self.token,
             'Content-Type': 'application/json'
         }
+
+    @staticmethod
+    def _read_token_file() -> str:
+        """回退读取 ~/.vault-token（Vault CLI 约定位置）。
+
+        由 GUI 启动的进程（桌面 App、launchd 任务）不加载 shell rc 文件，
+        VAULT_TOKEN 常常取不到；文件兜底可绕开这条环境变量继承链。
+        """
+        try:
+            path = os.path.expanduser('~/.vault-token')
+            if os.path.isfile(path):
+                with open(path, encoding='utf-8') as f:
+                    return f.read().strip()
+        except OSError:
+            pass
+        return ''
 
     def get_secret(self, path: str) -> Dict[str, Any]:
         """
