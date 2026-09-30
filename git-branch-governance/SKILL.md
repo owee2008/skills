@@ -10,12 +10,13 @@ description: "按 dev、test、main 与 feature/hotfix 分支职责引导并执�
 ## 长期分支职责
 
 - `main`：生产事实。仅包含已正式上线的提交；不为测试直接合入内容。
-- `test`：测试集成区。可同时包含多个待测功能；不默认是下一次发布的来源。
-- `dev`：开发基线。新业务功能从这里创建；不要直接在它上面串行堆积多个需求。
+- `test`：测试环境分支。它可以顺序合入所有需要测试的 `feature/*`，形成 10 个或更多集成 merge；不代表下一次发布版本。
+- `gray/*`：灰测发布分支。从 `main` 创建，选择已在 `test` 验证通过的功能组成干净候选版本；灰测通过后才合入 `main`。
+- `dev`：开发基线。只从 `main` 接收已上线内容；不要把 `test`、`gray/*` 或 `feature/*` 直接合入 `dev`。
 - `feature/*`：单一功能或需求的完整交付分支。
 - `hotfix/*`：从当前 `main` 临时创建的线上紧急修复分支。
 
-默认流程是 `dev -> feature/* -> test`，确认上线时再由对应的 `feature/* -> main`。除非用户明确指定测试集整体就是发布版本，禁止默认执行 `test -> main`。
+默认流程是 `dev -> feature/* -> test`；选择性上线时使用 `main -> gray/* -> main -> dev`。除非用户明确指定测试集整体就是发布版本，禁止默认执行 `test -> main`。除 `hotfix/*` 与 `gray/*` 外，`dev` 只创建 `feature/*`。
 
 ## 作者身份与默认 Git 配置
 
@@ -32,9 +33,9 @@ git config user.name zhangsan
 git config user.email zhangsan@tycmc.net
 ```
 
-默认仅允许快进合并：`git config --global merge.ff only`。执行任何普通 `git merge` 前，先确认它可快进；不能快进时命令必须失败，不得悄悄创建 merge commit。
+默认仅允许快进合并：`git config --global merge.ff only`。普通分支合并不能快进时必须失败，不得悄悄创建 merge commit。
 
-这个约束对并行测试集成有一个明确后果：`test` 已快进 A 后，来自同一 `dev` 的 `feature/B` 通常不能直接快进至 `test`。个人未共享的 B 可以先 `rebase test` 再快进；共享 B 不得自行 rebase，必须暂停并让团队决定是否改用集成分支、单独发布分支，或明确批准一次非快进合并。
+`test` 是唯一的常规例外：为保留“哪个功能何时进入测试环境”的集成记录，按提测清单显式执行 `git merge --no-ff feature/<name>`。这不是默认行为，也不应在 `main`、`dev` 或 `gray/*` 上隐式使用。
 
 ## 每次开发开始前
 
@@ -61,21 +62,23 @@ git switch -c feature/订单导出
 
 | 场景 | 分支动作 |
 | --- | --- |
-| 单功能正常上线 | `dev -> feature/* -> test`；验证后 `feature/* -> main`，再同步 `main -> dev`。 |
-| 多功能并行 | 每个功能分别从 `dev` 创建独立 `feature/*`，各自合入 `test`。 |
-| 选择性上线 | `test` 可有 A/B/C/D；只发布 D 时将 `feature/D` 合入 `main`，不合并整个 `test`。 |
+| 单功能正常上线 | `dev -> feature/* -> test`；验证后由 `main` 创建 `gray/*`，带入该功能，灰测通过再合入 `main -> dev`。 |
+| 多功能并行 | 每个功能分别从 `dev` 创建独立 `feature/*`，按提测清单依次合入 `test`；`test` 可以保留多个 merge 节点。 |
+| 选择性上线 | `test` 可有 A/B/C/D；仅发布 D 时从 `main` 创建 `gray/*`，只带入 D，不能整体 `test -> main`。 |
 | 开发中 dev 更新 | 个人未共享 feature 可 `rebase dev`；多人共享 feature 使用 `merge dev`。 |
 | 线上紧急 Bug | `main -> hotfix/* -> main -> dev`；不要从 `dev` 开始热修复。 |
 | 长周期 Feature | 在准备提测、周期较长或基线变更相关时同步 `dev`；不要为形式而频繁同步。 |
 | 成熟项目并行 | 接受正常 DAG；用分支职责、PR 与可独立交付判断健康度。 |
 | 高复杂度并发 | 分开记录功能提测、生产上线、热修复与回同步；不要为了直线历史混合职责。 |
 
-## 合并和上线
+## 测试、灰测与上线
 
-- 提测前确认目标 feature 是唯一要进入 `test` 的功能，并先验证目标分支可快进。默认使用 `git merge --ff-only <feature>`；不能快进时按“作者身份与默认 Git 配置”的规则处理，不得默认使用 `--no-ff`。
+- `test` 对应测试环境。每个已完成且需要测试的 `feature/*`，按提测清单显式以 `--no-ff` 合入 `test`；10 个功能可以有 10 个 test merge。
 - 测试期间的修复必须先回到对应 `feature/*`，再让 `test` 获得该修复；不得只在 `test` 留修复。
-- 上线前说明候选 feature、`main` 当前状态、该 feature 是否已在 `test` 验证。
-- `main` 合并成功且上线确认后，再将 `main` 同步回 `dev`，使热修复和生产差异回流。
+- 选择性上线时，从当前 `main` 创建 `gray/<release-name>`。`gray/*` 只包含本次批准上线、且已在 `test` 验证的功能。
+- Git 不能“部分 merge 一个分支”。要从 `test` 取部分内容，先在 `test` 的 first-parent 历史中定位对应 feature 的 merge，再由该 `feature/*` 合入 `gray/*`；若只取功能中的指定提交，使用经确认的 `cherry-pick` 提交列表。不得直接把整个 `test` 合入 `gray/*`。
+- 灰测通过后，将 `gray/*` 合入 `main`；确认生产上线后，`main` 是唯一允许合入 `dev` 的来源。`dev` 只再派生新的 `feature/*`。
+- 上线前说明候选 feature、`main` 当前状态、每个候选在 `test` 的验证证据和灰测结果。
 - 所有服务器部署、远端强推、删除远端分支必须在执行前得到明确授权。
 
 ## 历史改写与对象安全
