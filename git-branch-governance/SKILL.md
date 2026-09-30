@@ -10,7 +10,7 @@ description: "按 dev、test、main 与 feature/hotfix 分支职责引导并执�
 ## 长期分支职责
 
 - `main`：生产事实。仅包含已正式上线的提交；不为测试直接合入内容。
-- `test`：测试环境分支。它可以顺序合入所有需要测试的 `feature/*`，形成 10 个或更多集成 merge；全部内容确认可上线时，它可以直接合入 `main`。
+- `test`：测试环境分支。它优先以 fast-forward 方式接收待测 `feature/*`；全部内容确认可上线时，它可以直接合入 `main`。
 - `gray/*`：可选的灰测发布分支。仅当需要从 `test` 选择部分已验证功能上线时，从 `main` 创建干净候选版本；灰测通过后再合入 `main`。
 - `dev`：开发基线。只从 `main` 接收已上线内容；不要把 `test`、`gray/*` 或 `feature/*` 直接合入 `dev`。
 - `feature/*`：单一功能或需求的完整交付分支。
@@ -35,7 +35,7 @@ git config user.email zhangsan@tycmc.net
 
 默认仅允许快进合并：`git config --global merge.ff only`。普通分支合并不能快进时必须失败，不得悄悄创建 merge commit。
 
-`test` 是唯一的常规例外：为保留“哪个功能何时进入测试环境”的集成记录，按提测清单显式执行 `git merge --no-ff feature/<name>`。这不是默认行为，也不应在 `main`、`dev` 或 `gray/*` 上隐式使用。
+`test` 也优先使用 `git merge --ff-only feature/<name>`，使它只移动分支指针、不生成新的 merge commit。若下一个 feature 无法快进：个人未共享分支可先 rebase 到最新 `test`；共享分支则停止并说明影响。只有用户明确批准保留集成节点时，才可在 `test` 显式使用 `--no-ff`；这不是默认行为，也不应在 `main`、`dev` 或 `gray/*` 上隐式使用。
 
 ## 每次开发开始前
 
@@ -63,7 +63,7 @@ git switch -c feature/订单导出
 | 场景 | 分支动作 |
 | --- | --- |
 | 单功能正常上线 | `dev -> feature/* -> test`；若 test 仅含本次已验证内容，可 `test -> main -> dev`；灰测不是必经步骤。 |
-| 多功能并行 | 每个功能分别从 `dev` 创建独立 `feature/*`，按提测清单依次合入 `test`；`test` 可以保留多个 merge 节点。 |
+| 多功能并行 | 每个功能分别从 `dev` 创建独立 `feature/*`，按提测清单优先快进至 `test`；不能快进时先按共享性决定是否 rebase。 |
 | 选择性上线 | `test` 可有 A/B/C/D；仅发布 D 时从 `main` 创建 `gray/*`，只带入 D，不能整体 `test -> main`。 |
 | 开发中 dev 更新 | 个人未共享 feature 可 `rebase dev`；多人共享 feature 使用 `merge dev`。 |
 | 线上紧急 Bug | `main -> hotfix/* -> main -> dev`；不要从 `dev` 开始热修复。 |
@@ -73,7 +73,8 @@ git switch -c feature/订单导出
 
 ## 测试、灰测与上线
 
-- `test` 对应测试环境。每个已完成且需要测试的 `feature/*`，按提测清单显式以 `--no-ff` 合入 `test`；10 个功能可以有 10 个 test merge。
+- `test` 对应测试环境。每个已完成且需要测试的 `feature/*`，按提测清单优先以 `--ff-only` 合入；`test` 本身不应主动产生业务或 merge commit。
+- 若 feature 无法快进到 `test`，个人未共享分支可先 rebase 到最新 `test` 后快进；共享分支必须先报告，未经明确批准不得改写历史或使用 `--no-ff`。
 - 测试期间的修复必须先回到对应 `feature/*`，再让 `test` 获得该修复；不得只在 `test` 留修复。
 - 当 `test` 中全部内容均已通过测试、且用户明确确认整批上线时，允许直接 `test -> main`；仍须先验证它可快进，不能快进时不得静默生成 merge commit。
 - 选择性上线时，从当前 `main` 创建 `gray/<release-name>`。`gray/*` 只包含本次批准上线、且已在 `test` 验证的功能。
